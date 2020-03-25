@@ -1,19 +1,17 @@
-import ipaddress
-import functools
 import hashlib
 import re
 import time
 import zlib
+from importlib import import_module
 
 from django.conf import settings
 from django.core.cache import caches
 from django.core.exceptions import ImproperlyConfigured
-from django.utils.module_loading import import_string
 
 from ratelimit import ALL, UNSAFE
 
 
-__all__ = ['is_ratelimited', 'get_usage']
+__all__ = ['is_ratelimited']
 
 _PERIODS = {
     's': 1,
@@ -26,27 +24,14 @@ _PERIODS = {
 EXPIRATION_FUDGE = 5
 
 
-def ip_mask(ip):
-    if ':' in ip:
-        # IPv6
-        mask = getattr(settings, 'RATELIMIT_IPV6_MASK', 64)
-    else:
-        # IPv4
-        mask = getattr(settings, 'RATELIMIT_IPV4_MASK', 32)
-
-    network = ipaddress.ip_network('{}/{}'.format(ip, mask), strict=False)
-
-    return str(network.network_address)
-
-
 def user_or_ip(request):
     if request.user.is_authenticated:
         return str(request.user.pk)
-    return ip_mask(request.META['REMOTE_ADDR'])
+    return request.META['REMOTE_ADDR']
 
 
 _SIMPLE_KEYS = {
-    'ip': lambda r: ip_mask(r.META['REMOTE_ADDR']),
+    'ip': lambda r: r.META['REMOTE_ADDR'],
     'user': lambda r: str(r.user.pk),
     'user_or_ip': user_or_ip,
 }
@@ -100,10 +85,11 @@ def _get_window(value, period):
     return w
 
 
-def _make_cache_key(group, window, rate, value, methods):
+def _make_cache_key(group, rate, value, methods):
     count, period = _split_rate(rate)
     safe_rate = '%d/%ds' % (count, period)
-    parts = [group, safe_rate, value, str(window)]
+    window = _get_window(value, period)
+    parts = [group + safe_rate, value, str(window)]
     if methods is not None:
         if methods == ALL:
             methods = ''
@@ -116,53 +102,52 @@ def _make_cache_key(group, window, rate, value, methods):
 
 def is_ratelimited(request, group=None, fn=None, key=None, rate=None,
                    method=ALL, increment=False):
-    usage = get_usage(request, group, fn, key, rate, method, increment)
-    if usage is None:
-        return False
-
-    return usage['should_limit']
-
-
-def get_usage(request, group=None, fn=None, key=None, rate=None, method=ALL,
-              increment=False):
-    if group is None and fn is None:
-        raise ImproperlyConfigured('get_usage must be called with either '
-                                   '`group` or `fn` arguments')
+    if group is None:
+        if hasattr(fn, '__self__'):
+            parts = fn.__module__, fn.__self__.__class__.__name__, fn.__name__
+        else:
+            parts = (fn.__module__, fn.__name__)
+        group = '.'.join(parts)
 
     if not getattr(settings, 'RATELIMIT_ENABLE', True):
-        return None
+        request.limited = False
+        return False
 
     if not _method_match(request, method):
-        return None
+        return False
 
-    if group is None:
-        parts = []
-
-        if isinstance(fn, functools.partial):
-            fn = fn.func
-
-        # Django <2.1 doesn't use a partial. This is ugly and inelegant, but
-        # throwing __qualname__ into the list below helps.
-        if fn.__name__ == 'bound_func':
-            fn = fn.__closure__[0].cell_contents
-
-        if hasattr(fn, '__module__'):
-            parts.append(fn.__module__)
-
-        if hasattr(fn, '__self__'):
-            parts.append(fn.__self__.__class__.__name__)
-
-        parts.append(fn.__qualname__)
-        group = '.'.join(parts)
+    old_limited = getattr(request, 'limited', False)
 
     if callable(rate):
         rate = rate(group, request)
-    if rate is None:
-        return None
-    limit, period = _split_rate(rate)
 
+    if rate is None:
+        request.limited = old_limited
+        return False
+    usage = get_usage_count(request, group, fn, key, rate, method, increment)
+
+    fail_open = getattr(settings, 'RATELIMIT_FAIL_OPEN', False)
+
+    usage_count = usage.get('count')
+    if usage_count is None:
+        limited = not fail_open
+    else:
+        usage_limit = usage.get('limit')
+        limited = usage_count > usage_limit
+
+    if increment:
+        request.limited = old_limited or limited
+    return limited
+
+
+def get_usage_count(request, group=None, fn=None, key=None, rate=None,
+                    method=ALL, increment=False):
     if not key:
         raise ImproperlyConfigured('Ratelimit key must be specified')
+    limit, period = _split_rate(rate)
+    cache_name = getattr(settings, 'RATELIMIT_USE_CACHE', 'default')
+    cache = caches[cache_name]
+
     if callable(key):
         value = key(group, request)
     elif key in _SIMPLE_KEYS:
@@ -173,56 +158,29 @@ def get_usage(request, group=None, fn=None, key=None, rate=None, method=ALL,
             raise ImproperlyConfigured('Unknown ratelimit key: %s' % key)
         value = _ACCESSOR_KEYS[accessor](request, k)
     elif '.' in key:
-        keyfn = import_string(key)
+        mod, attr = key.rsplit('.', 1)
+        keyfn = getattr(import_module(mod), attr)
         value = keyfn(group, request)
     else:
         raise ImproperlyConfigured(
             'Could not understand ratelimit key: %s' % key)
 
-    window = _get_window(value, period)
+    cache_key = _make_cache_key(group, rate, value, method)
+    time_left = _get_window(value, period) - int(time.time())
     initial_value = 1 if increment else 0
-
-    cache_name = getattr(settings, 'RATELIMIT_USE_CACHE', 'default')
-    cache = caches[cache_name]
-    cache_key = _make_cache_key(group, window, rate, value, method)
-
-    count = None
     added = cache.add(cache_key, initial_value, period + EXPIRATION_FUDGE)
     if added:
         count = initial_value
     else:
         if increment:
             try:
-                # python3-memcached will throw a ValueError if the server is
-                # unavailable or (somehow) the key doesn't exist. redis, on the
-                # other hand, simply returns None.
                 count = cache.incr(cache_key)
             except ValueError:
-                pass
+                count = initial_value
         else:
             count = cache.get(cache_key, initial_value)
-
-    # Getting or setting the count from the cache failed
-    if count is None:
-        if getattr(settings, 'RATELIMIT_FAIL_OPEN', False):
-            return None
-        return {
-            'count': 0,
-            'limit': 0,
-            'should_limit': True,
-            'time_left': -1,
-        }
-
-    time_left = window - int(time.time())
-    return {
-        'count': count,
-        'limit': limit,
-        'should_limit': count > limit,
-        'time_left': time_left,
-    }
+    return {'count': count, 'limit': limit, 'time_left': time_left}
 
 
 is_ratelimited.ALL = ALL
 is_ratelimited.UNSAFE = UNSAFE
-get_usage.ALL = ALL
-get_usage.UNSAFE = UNSAFE

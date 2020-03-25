@@ -17,14 +17,15 @@ CACHES = {
     },
     'connection-errors-redis': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://test-connection-errors',
+        'LOCATION': 'test-connection-errors',
         'OPTIONS': {
             'IGNORE_EXCEPTIONS': True,
         }
     },
     'instant-expiration': {
-        'BACKEND': 'django.core.cache.backends.dummy.DummyCache',
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
         'LOCATION': 'test-instant-expiration',
+        'TIMEOUT': 0,
     },
 }
 

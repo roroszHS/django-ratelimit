@@ -59,17 +59,15 @@ Middleware
 Writing a small middleware class to set ``REMOTE_ADDR`` to the actual
 client IP address is generally simple::
 
-    def reverse_proxy(get_response):
-        def process_request(request):
+    class ReverseProxy(object):
+        def process_request(self, request):
             request.META['REMOTE_ADDR'] = # [...]
-            return get_response(request)
-        return process_request
 
 where ``# [...]`` depends on your environment. This middleware should be
 close to the top of the list::
 
-    MIDDLEWARE = (
-        'path.to.reverse_proxy',
+    MIDDLEWARE_CLASSES = (
+        'path.to.ReverseProxy',
         # ...
     )
 

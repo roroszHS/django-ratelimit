@@ -10,9 +10,7 @@ Using Django Ratelimit
 Use as a decorator
 ==================
 
-Import:
-
-.. code-block:: python
+Import::
 
     from ratelimit.decorators import ratelimit
 
@@ -35,9 +33,7 @@ Import:
         * ``h`` - hours
         * ``d`` - days
 
-        Also accepts callables. See :ref:`Rates <rates-chapter>`. A rate
-        of ``0/s`` disallows all requests. A rate of ``None`` means "no
-        limit" and will allow all requests.
+        Also accepts callables. See :ref:`Rates <rates-chapter>`.
 
    :arg method:
         *ALL* Which HTTP method(s) to rate-limit. May be a string, a
@@ -57,10 +53,8 @@ Each decorator can be limited to one or more HTTP methods. The
 tuple of strings (e.g. ``('GET', 'OPTIONS')``).
 
 There are two special shortcuts values, both accessible from the
-``ratelimit`` decorator or the ``is_ratelimited`` helper, as well as on
-the root ``ratelimit`` module:
-
-.. code-block:: python
+``ratelimit`` decorator, the ``RatelimitMixin`` class, or the
+``is_ratelimited`` helper, as well as on the root ``ratelimit`` module::
 
     from ratelimit.decorators import ratelimit
 
@@ -77,7 +71,7 @@ Examples
 --------
 
 
-.. code-block:: python
+::
 
     @ratelimit(key='ip', rate='5/m')
     def myview(request):
@@ -118,7 +112,7 @@ Examples
         # Allow 4 reqs/hour.
         return HttpResponse()
 
-    rate = lambda g, r: None if r.user.is_authenticated else '100/h'
+    rate = lambda r: None if request.user.is_authenticated else '100/h'
     @ratelimit(key='ip', rate=rate)
     def skipif1(request):
         # Only rate limit anonymous requests
@@ -144,8 +138,8 @@ Examples
         # Uses the X-Cluster-Client-IP header value.
         return HttpResponse()
 
-    @ratelimit(key=lambda g, r: r.META.get('HTTP_X_CLUSTER_CLIENT_IP',
-                                           r.META['REMOTE_ADDR'])
+    @ratelimit(key=lambda r: r.META.get('HTTP_X_CLUSTER_CLIENT_IP',
+                                        r.META['REMOTE_ADDR'])
     def myview(request):
         # Use `X-Cluster-Client-IP` but fall back to REMOTE_ADDR.
         return HttpResponse()
@@ -155,69 +149,63 @@ Class-Based Views
 -----------------
 
 .. versionadded:: 0.5
-.. versionchanged:: 3.0
 
-To use the ``@ratelimit`` decorator with class-based views, use the
-Django ``@method_decorator``:
-
-.. code-block:: python
-
-    from django.utils.decorators import method_decorator
-    from django.views.generic import View
+The ``@ratelimit`` decorator also works on class-based view methods,
+though *make sure the ``method`` argument matches the decorator*::
 
     class MyView(View):
-        @method_decorator(ratelimit(key='ip', rate='1/m', method='GET'))
-        def get(self, request):
-            pass
-
-    @method_decorator(ratelimit(key='ip', rate='1/m', method='GET'), name='get')
-    class MyOtherView(View):
-        def get(self, request):
-            pass
-
-It is also possible to wrap a whole view later, e.g.:
-
-.. code-block:: python
-
-    from django.urls import path
-
-    from myapp.views import MyView
-
-    from ratelimit.decorators import ratelimit
-
-    urlpatterns = [
-        path('/', ratelimit(key='ip', method='GET', rate='1/m')(MyView.as_view())),
-    ]
-
-.. warning::
-
-    Make sure the ``method`` argument matches the method decorated.
+        @ratelimit(key='ip', method='POST')
+        def post(self, request, *args):
+            # Something expensive...
 
 .. note::
-
    Unless given an explicit ``group`` argument, different methods of a
    class-based view will be limited separate.
 
 
+.. _usage-mixin:
+
+Class-Based View Mixin
+======================
+
+.. py:class:: ratelimit.mixins.RatelimitMixin
+
+.. versionadded:: 0.4
+
+Ratelimits can also be applied to class-based views with the
+``ratelimit.mixins.RatelimitMixin`` mixin. They are configured via class
+attributes that are the same as the :ref:`decorator <usage-decorator>`,
+prefixed with ``ratelimit_``, e.g.::
+
+    class MyView(RatelimitMixin, View):
+        ratelimit_key = 'ip'
+        ratelimit_rate = '10/m'
+        ratelimit_block = False
+        ratelimit_method = 'GET'
+
+        def get(self, request, *args, **kwargs):
+            # Calculate expensive report...
+
+.. versionchanged:: 0.5
+   The name of the mixin changed from ``RateLimitMixin`` to
+   ``RatelimitMixin`` for consistency.
+
+
 .. _usage-helper:
 
-Core Methods
-============
+Helper Function
+===============
 
-.. versionadded:: 3.0
+In some cases the decorator is not flexible enough. If this is an
+issue you use the ``is_ratelimited`` helper function. It's similar to
+the decorator.
 
-In some cases the decorator is not flexible enough to, e.g.,
-conditionally apply rate limits. In these cases, you can access the core
-functionality in ``ratelimit.core``. The two major methods are
-``get_usage`` and ``is_ratelimited``.
+Import::
+
+    from ratelimit.utils import is_ratelimited
 
 
-.. code-block:: python
-
-    from ratelimit.core import get_usage, is_ratelimited
-
-.. py:function:: get_usage(request, group=None, fn=None, key=None, \
-                           rate=None, method=ALL, increment=False)
+.. py:function:: is_ratelimited(request, group=None, key=, rate=None, method=ALL, increment=False)
 
    :arg request:
        *None* The HTTPRequest object.
@@ -225,10 +213,6 @@ functionality in ``ratelimit.core``. The two major methods are
    :arg group:
        *None* A group of rate limits to count together. Defaults to the
        dotted name of the view.
-
-   :arg fn:
-       *None* A view function which can be used to calculate the group
-       as if it was decorated by :ref:`@ratelimit <usage-decorator>`.
 
    :arg key:
        What key to use, see :ref:`Keys <keys-chapter>`.
@@ -250,61 +234,6 @@ functionality in ``ratelimit.core``. The two major methods are
 
    :arg increment:
        *False* Whether to increment the count or just check.
-
-   :returns dict or None:
-       Either returns None, indicating that ratelimiting was not active
-       for this request (for some reason) or returns a dict including
-       the current count, limit, time left in the window, and whether
-       this request should be limited.
-
-.. py:function:: is_ratelimited(request, group=None, fn=None, \
-                                key=None, rate=None, method=ALL, \
-                                increment=False)
-
-   :arg request:
-       *None* The HTTPRequest object.
-
-   :arg group:
-       *None* A group of rate limits to count together. Defaults to the
-       dotted name of the view.
-
-   :arg fn:
-       *None* A view function which can be used to calculate the group
-       as if it was decorated by :ref:`@ratelimit <usage-decorator>`.
-
-   :arg key:
-       What key to use, see :ref:`Keys <keys-chapter>`.
-
-   :arg rate:
-       *'5/m'* The number of requests per unit time allowed. Valid
-       units are:
-
-       * ``s`` - seconds
-       * ``m`` - minutes
-       * ``h`` - hours
-       * ``d`` - days
-
-       Also accepts callables. See :ref:`Rates <rates-chapter>`.
-
-   :arg method:
-       *ALL* Which HTTP method(s) to rate-limit. May be a string, a
-       list/tuple, or ``None`` for all methods.
-
-   :arg increment:
-       *False* Whether to increment the count or just check.
-
-   :returns bool:
-       Whether this request should be limited or not.
-
-
-``is_ratelimited`` is a thin wrapper around ``get_usage`` that is
-maintained for compatibility. It provides strictly less information.
-
-.. warning::
-    
-    ``get_usage`` and ``is_ratelimited`` require either ``group=`` or
-    ``fn=`` to be passed, or they cannot determine the rate limiting
-    state and will throw.
 
 
 .. _usage-exception:
@@ -343,7 +272,7 @@ There is optional middleware to use a custom view to handle ``Ratelimited``
 exceptions.
 
 To use it, add ``ratelimit.middleware.RatelimitMiddleware`` to your
-``MIDDLEWARE`` (toward the bottom of the list) and set
+``MIDDLEWARE_CLASSES`` (toward the bottom of the list) and set
 ``RATELIMIT_VIEW`` to the full path of a view you want to use.
 
 The view specified in ``RATELIMIT_VIEW`` will get two arguments, the
